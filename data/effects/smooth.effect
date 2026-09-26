@@ -16,7 +16,12 @@ uniform float2 right_eye_3;
 uniform float smooth_strength;
 uniform float smooth_center;
 uniform float smooth_radius;
+uniform float smooth_chroma;
 uniform float eye_strength;
+uniform float sharpen_amount;
+uniform float sharpen_radius;
+uniform float sharpen_chroma;
+uniform float sharpen_masked;
 uniform float detection_alpha;
 uniform float detection_alpha_2;
 uniform float detection_alpha_3;
@@ -127,6 +132,8 @@ float4 PSBeauty(VertData v_in) : TARGET
   float under_eyes = max(under_eyes_1, max(under_eyes_2, under_eyes_3));
 
   if (debug_view > 0.5) {
+    if (debug_view > 2.5)
+      return float4(float3(face, face, face), original.a);
     if (debug_view < 1.5) {
       float eye_points_1 = eye_point_mask(uv, face_size, left_eye, right_eye) * detection_alpha;
       float eye_points_2 = eye_point_mask(uv, face_size_2, left_eye_2, right_eye_2) * detection_alpha_2;
@@ -156,7 +163,9 @@ float4 PSBeauty(VertData v_in) : TARGET
 
   // Keep smoothing away from the eyes and mouth where blur looks artificial.
   float smooth_mask = smooth_region * smooth_strength;
-  float3 color = saturate(original.rgb - middle_band * smooth_mask);
+  float luma_band = luminance(middle_band);
+  float3 correction = lerp(float3(luma_band, luma_band, luma_band), middle_band, smooth_chroma);
+  float3 color = saturate(original.rgb - correction * smooth_mask);
 
   float shadow = saturate((0.52 - luminance(color)) * 2.2);
   float lift = under_eyes * shadow * eye_strength * 0.28;
@@ -165,11 +174,49 @@ float4 PSBeauty(VertData v_in) : TARGET
   return float4(color, original.a);
 }
 
+float4 PSSharpen(VertData v_in) : TARGET
+{
+  float2 uv = v_in.uv;
+  float4 original = image.Sample(linear_clamp, uv);
+  float2 radius = texel_size * sharpen_radius;
+  float3 blurred = (
+    image.Sample(linear_clamp, uv + float2(1.0, 0.0) * radius).rgb +
+    image.Sample(linear_clamp, uv + float2(-1.0, 0.0) * radius).rgb +
+    image.Sample(linear_clamp, uv + float2(0.0, 1.0) * radius).rgb +
+    image.Sample(linear_clamp, uv + float2(0.0, -1.0) * radius).rgb +
+    image.Sample(linear_clamp, uv + float2(0.707, 0.707) * radius).rgb +
+    image.Sample(linear_clamp, uv + float2(-0.707, 0.707) * radius).rgb +
+    image.Sample(linear_clamp, uv + float2(0.707, -0.707) * radius).rgb +
+    image.Sample(linear_clamp, uv + float2(-0.707, -0.707) * radius).rgb
+  ) * 0.125;
+  float3 rgb_detail = original.rgb - blurred;
+  float luma_detail = luminance(original.rgb) - luminance(blurred);
+  float face_1 = ellipse_mask(uv, face_center, face_size, 0.22) * detection_alpha;
+  float face_2 = ellipse_mask(uv, face_center_2, face_size_2, 0.22) * detection_alpha_2;
+  float face_3 = ellipse_mask(uv, face_center_3, face_size_3, 0.22) * detection_alpha_3;
+  float face = max(face_1, max(face_2, face_3));
+  float sharpen_mask = lerp(1.0, face, sharpen_masked);
+  float amount = sharpen_amount * sharpen_mask;
+  float3 luma_sharpened = original.rgb + float3(luma_detail, luma_detail, luma_detail) * amount;
+  float3 rgb_sharpened = original.rgb + rgb_detail * amount;
+  float3 color = lerp(luma_sharpened, rgb_sharpened, sharpen_chroma);
+  return float4(saturate(color), original.a);
+}
+
 technique Draw
 {
   pass
   {
     vertex_shader = VSDefault(v_in);
     pixel_shader = PSBeauty(v_in);
+  }
+}
+
+technique Sharpen
+{
+  pass
+  {
+    vertex_shader = VSDefault(v_in);
+    pixel_shader = PSSharpen(v_in);
   }
 }

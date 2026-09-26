@@ -114,6 +114,7 @@ In OBS, open a camera source's **Filters**, add **Smooth**, then start with:
 - Smoothing amount: 0.45–0.60
 - Detail center: 5–10 px
 - Band width: 8–14 px
+- Chroma smoothing: 0.0 for luma-only, 1.0 for full RGB smoothing
 - Dark-eye correction: 0.30–0.50
 - Face detection rate: 6–10 fps
 
@@ -133,3 +134,12 @@ only the detail between them. A useful workflow is to start with a wide band,
 sweep the center until the intended skin variation is selected, then tighten
 the width and set the final amount. The extended ranges allow centers up to
 80 px, widths up to 120 px, and deliberately exaggerated amounts up to 2.0.
+
+Sharpening can be disabled or placed before or after smoothing. Both choices
+are true GPU passes through an intermediate texture: **Before smoothing**
+enhances fine texture before the selected middle band is removed, while
+**After smoothing** sharpens the cleaned result. Sharpening defaults to luma
+only; **Sharpen chroma** blends toward full RGB sharpening when desired.
+**Sharpen scope** can process the full frame or restrict sharpening to the
+three feathered detected-face regions. Select **Sharpen mask** under Mask
+preview to inspect that region directly.
