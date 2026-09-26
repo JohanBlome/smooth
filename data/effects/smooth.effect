@@ -1,0 +1,175 @@
+uniform texture2d image;
+uniform float4x4 ViewProj;
+uniform float2 texel_size;
+uniform float2 face_center;
+uniform float2 face_size;
+uniform float2 left_eye;
+uniform float2 right_eye;
+uniform float2 face_center_2;
+uniform float2 face_size_2;
+uniform float2 left_eye_2;
+uniform float2 right_eye_2;
+uniform float2 face_center_3;
+uniform float2 face_size_3;
+uniform float2 left_eye_3;
+uniform float2 right_eye_3;
+uniform float smooth_strength;
+uniform float smooth_center;
+uniform float smooth_radius;
+uniform float eye_strength;
+uniform float detection_alpha;
+uniform float detection_alpha_2;
+uniform float detection_alpha_3;
+uniform float debug_view;
+
+sampler_state linear_clamp {
+  Filter = Linear;
+  AddressU = Clamp;
+  AddressV = Clamp;
+};
+
+struct VertData {
+  float4 pos : POSITION;
+  float2 uv : TEXCOORD0;
+};
+
+VertData VSDefault(VertData v_in)
+{
+  VertData vert_out;
+  vert_out.pos = mul(float4(v_in.pos.xyz, 1.0), ViewProj);
+  vert_out.uv = v_in.uv;
+  return vert_out;
+}
+
+float luminance(float3 color)
+{
+  return dot(color, float3(0.2126, 0.7152, 0.0722));
+}
+
+float ellipse_mask(float2 uv, float2 center, float2 size, float feather)
+{
+  float2 p = (uv - center) / max(size * 0.5, float2(0.0001, 0.0001));
+  return 1.0 - smoothstep(1.0 - feather, 1.0, length(p));
+}
+
+float eye_exclusion_mask(float2 uv, float2 size, float2 eye_a, float2 eye_b)
+{
+  return max(
+    ellipse_mask(uv, eye_a, size * float2(0.22, 0.105), 0.35),
+    ellipse_mask(uv, eye_b, size * float2(0.22, 0.105), 0.35)
+  );
+}
+
+float under_eye_mask(float2 uv, float face, float2 size, float2 eye_a, float2 eye_b)
+{
+  float2 offset = float2(0.0, size.y * 0.035);
+  float2 region_size = size * float2(0.24, 0.115);
+  return max(
+    ellipse_mask(uv, eye_a + offset, region_size, 0.45),
+    ellipse_mask(uv, eye_b + offset, region_size, 0.45)
+  ) * face;
+}
+
+float eye_point_mask(float2 uv, float2 size, float2 eye_a, float2 eye_b)
+{
+  return max(
+    ellipse_mask(uv, eye_a, size * float2(0.055, 0.035), 0.3),
+    ellipse_mask(uv, eye_b, size * float2(0.055, 0.035), 0.3)
+  );
+}
+
+float4 weighted_sample(float2 uv, float2 offset, float original_luma)
+{
+  float3 sample_color = image.Sample(linear_clamp, uv + offset).rgb;
+  float delta = abs(luminance(sample_color) - original_luma);
+  float weight = saturate(1.0 - delta * 8.0);
+  weight *= weight;
+  return float4(sample_color * weight, weight);
+}
+
+float3 edge_aware_lowpass(float2 uv, float original_luma, float radius_pixels)
+{
+  float2 radius = texel_size * radius_pixels;
+  float3 original = image.Sample(linear_clamp, uv).rgb;
+  float4 accumulated = float4(original * 2.0, 2.0);
+  accumulated += weighted_sample(uv, float2(1.0, 0.0) * radius, original_luma);
+  accumulated += weighted_sample(uv, float2(-1.0, 0.0) * radius, original_luma);
+  accumulated += weighted_sample(uv, float2(0.0, 1.0) * radius, original_luma);
+  accumulated += weighted_sample(uv, float2(0.0, -1.0) * radius, original_luma);
+  accumulated += weighted_sample(uv, float2(0.707, 0.707) * radius, original_luma);
+  accumulated += weighted_sample(uv, float2(-0.707, 0.707) * radius, original_luma);
+  accumulated += weighted_sample(uv, float2(0.707, -0.707) * radius, original_luma);
+  accumulated += weighted_sample(uv, float2(-0.707, -0.707) * radius, original_luma);
+  accumulated += weighted_sample(uv, float2(0.45, 0.0) * radius, original_luma);
+  accumulated += weighted_sample(uv, float2(-0.45, 0.0) * radius, original_luma);
+  accumulated += weighted_sample(uv, float2(0.0, 0.45) * radius, original_luma);
+  accumulated += weighted_sample(uv, float2(0.0, -0.45) * radius, original_luma);
+  return accumulated.rgb / accumulated.a;
+}
+
+float4 PSBeauty(VertData v_in) : TARGET
+{
+  float2 uv = v_in.uv;
+  float4 original = image.Sample(linear_clamp, uv);
+  float original_luma = luminance(original.rgb);
+
+  float face_1 = ellipse_mask(uv, face_center, face_size, 0.22) * detection_alpha;
+  float face_2 = ellipse_mask(uv, face_center_2, face_size_2, 0.22) * detection_alpha_2;
+  float face_3 = ellipse_mask(uv, face_center_3, face_size_3, 0.22) * detection_alpha_3;
+  float face = max(face_1, max(face_2, face_3));
+  float smooth_region_1 = face_1 * (1.0 - eye_exclusion_mask(uv, face_size, left_eye, right_eye) * 0.72);
+  float smooth_region_2 = face_2 * (1.0 - eye_exclusion_mask(uv, face_size_2, left_eye_2, right_eye_2) * 0.72);
+  float smooth_region_3 = face_3 * (1.0 - eye_exclusion_mask(uv, face_size_3, left_eye_3, right_eye_3) * 0.72);
+  float smooth_region = max(smooth_region_1, max(smooth_region_2, smooth_region_3));
+  float under_eyes_1 = under_eye_mask(uv, face_1, face_size, left_eye, right_eye);
+  float under_eyes_2 = under_eye_mask(uv, face_2, face_size_2, left_eye_2, right_eye_2);
+  float under_eyes_3 = under_eye_mask(uv, face_3, face_size_3, left_eye_3, right_eye_3);
+  float under_eyes = max(under_eyes_1, max(under_eyes_2, under_eyes_3));
+
+  if (debug_view > 0.5) {
+    if (debug_view < 1.5) {
+      float eye_points_1 = eye_point_mask(uv, face_size, left_eye, right_eye) * detection_alpha;
+      float eye_points_2 = eye_point_mask(uv, face_size_2, left_eye_2, right_eye_2) * detection_alpha_2;
+      float eye_points_3 = eye_point_mask(uv, face_size_3, left_eye_3, right_eye_3) * detection_alpha_3;
+      float eye_points = max(eye_points_1, max(eye_points_2, eye_points_3));
+      float3 geometry = float3(0.0, face * 0.65, 0.0);
+      geometry = lerp(geometry, float3(1.0, 0.15, 0.0), eye_points);
+      geometry = lerp(geometry, float3(0.1, 0.35, 1.0), under_eyes * 0.75);
+      return float4(geometry, original.a);
+    }
+    float3 treatment = float3(smooth_region, smooth_region, smooth_region);
+    treatment = lerp(treatment, float3(0.1, 0.35, 1.0), under_eyes * eye_strength);
+    return float4(treatment, original.a);
+  }
+
+  if (face <= 0.0)
+    return original;
+
+  // Decompose the image into fine detail, a middle band, and broad structure.
+  // Removing only the middle band keeps pores and major facial lines intact.
+  float half_width = smooth_radius * 0.5;
+  float inner_radius = max(0.75, smooth_center - half_width);
+  float outer_radius = max(inner_radius + 0.5, smooth_center + half_width);
+  float3 inner_base = edge_aware_lowpass(uv, original_luma, inner_radius);
+  float3 outer_base = edge_aware_lowpass(uv, original_luma, outer_radius);
+  float3 middle_band = inner_base - outer_base;
+
+  // Keep smoothing away from the eyes and mouth where blur looks artificial.
+  float smooth_mask = smooth_region * smooth_strength;
+  float3 color = saturate(original.rgb - middle_band * smooth_mask);
+
+  float shadow = saturate((0.52 - luminance(color)) * 2.2);
+  float lift = under_eyes * shadow * eye_strength * 0.28;
+  color = lerp(color, color + (1.0 - color) * 0.32, saturate(lift));
+
+  return float4(color, original.a);
+}
+
+technique Draw
+{
+  pass
+  {
+    vertex_shader = VSDefault(v_in);
+    pixel_shader = PSBeauty(v_in);
+  }
+}

@@ -1,0 +1,6 @@
+/build*/
+/.cache/
+/.deps/
+/.DS_Store
+compile_commands.json
+data/models/*.onnx
