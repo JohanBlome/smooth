@@ -114,6 +114,7 @@ In OBS, open a camera source's **Filters**, add **Smooth**, then start with:
 - Smoothing amount: 0.45–0.60
 - Detail center: 5–10 px
 - Band width: 8–14 px
+- Face-size scaling: 1.0 to keep the selected detail scale stable as faces move in depth
 - Chroma smoothing: 0.0 for luma-only, 1.0 for full RGB smoothing
 - Dark-eye correction: 0.30–0.50
 - Face detection rate: 6–10 fps
@@ -143,3 +144,10 @@ only; **Sharpen chroma** blends toward full RGB sharpening when desired.
 **Sharpen scope** can process the full frame or restrict sharpening to the
 three feathered detected-face regions. Select **Sharpen mask** under Mask
 preview to inspect that region directly.
+
+**Face-size scaling** interpolates between fixed pixel radii (`0.0`) and fully
+face-relative radii (`1.0`). At full scaling, the smoothing center and width are
+interpreted at a reference face height of 480 pixels and scale independently
+for each of the three detected faces. Masked sharpening follows the same local
+scale; full-frame sharpening remains fixed in screen pixels. Scaling is clamped
+for very small or very large detections to avoid unstable sampling radii.

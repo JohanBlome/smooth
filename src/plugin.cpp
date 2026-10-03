@@ -22,6 +22,7 @@ constexpr const char *kSmoothStrength = "smooth_strength";
 constexpr const char *kSmoothCenter = "smooth_center";
 constexpr const char *kSmoothRadius = "smooth_radius";
 constexpr const char *kSmoothChroma = "smooth_chroma";
+constexpr const char *kFaceSizeScaling = "face_size_scaling";
 constexpr const char *kEyeStrength = "eye_strength";
 constexpr const char *kSharpenPosition = "sharpen_position";
 constexpr const char *kSharpenAmount = "sharpen_amount";
@@ -51,6 +52,7 @@ struct SmoothFilter {
   gs_eparam_t *smooth_center_param = nullptr;
   gs_eparam_t *smooth_radius_param = nullptr;
   gs_eparam_t *smooth_chroma_param = nullptr;
+  gs_eparam_t *face_size_scaling_param = nullptr;
   gs_eparam_t *eye_strength_param = nullptr;
   gs_eparam_t *sharpen_amount_param = nullptr;
   gs_eparam_t *sharpen_radius_param = nullptr;
@@ -63,6 +65,7 @@ struct SmoothFilter {
   std::atomic<float> smooth_center{7.0f};
   std::atomic<float> smooth_radius{10.0f};
   std::atomic<float> smooth_chroma{1.0f};
+  std::atomic<float> face_size_scaling{0.0f};
   std::atomic<float> eye_strength{0.45f};
   std::atomic<int> sharpen_position{0};
   std::atomic<float> sharpen_amount{0.35f};
@@ -73,6 +76,7 @@ struct SmoothFilter {
   std::atomic<int> debug_view{0};
 
   std::array<FaceResult, kMaxFaces> displayed_faces{};
+  std::array<FaceResult, kMaxFaces> target_faces{};
   std::array<bool, kMaxFaces> face_present{};
   std::array<float, kMaxFaces> face_visibility{};
   uint64_t seen_generation = 0;
@@ -213,15 +217,77 @@ void update_face_tracking(SmoothFilter *filter)
   const DetectionResult newest = filter->detector ? filter->detector->latest() : DetectionResult{};
   if (newest.generation != filter->seen_generation) {
     filter->seen_generation = newest.generation;
-    for (size_t index = 0; index < kMaxFaces; ++index) {
-      filter->face_present[index] = index < newest.count && newest.faces[index].confidence > 0.0f;
-      if (filter->face_present[index])
-        filter->displayed_faces[index] = newest.faces[index];
+    std::array<bool, kMaxFaces> slot_used{};
+    std::array<bool, kMaxFaces> detection_used{};
+    std::array<bool, kMaxFaces> next_present{};
+
+    // Keep existing slots attached to the nearest face so size changes can be
+    // interpolated without identities swapping when face areas cross.
+    for (size_t slot = 0; slot < kMaxFaces; ++slot) {
+      if (filter->face_visibility[slot] <= 0.01f)
+        continue;
+      int best = -1;
+      float best_distance = 1.0e9f;
+      for (size_t detection = 0; detection < newest.count; ++detection) {
+        if (detection_used[detection])
+          continue;
+        const FaceResult &candidate = newest.faces[detection];
+        const float dx = candidate.center_x - filter->displayed_faces[slot].center_x;
+        const float dy = candidate.center_y - filter->displayed_faces[slot].center_y;
+        const float distance = dx * dx + dy * dy;
+        const float reach = std::max(0.12f, std::max(candidate.width, filter->displayed_faces[slot].width) * 1.5f);
+        if (distance < reach * reach && distance < best_distance) {
+          best_distance = distance;
+          best = static_cast<int>(detection);
+        }
+      }
+      if (best >= 0) {
+        slot_used[slot] = true;
+        detection_used[static_cast<size_t>(best)] = true;
+        next_present[slot] = true;
+        filter->target_faces[slot] = newest.faces[static_cast<size_t>(best)];
+      }
     }
+
+    // Put newly appearing faces into the least-visible free slots.
+    for (size_t detection = 0; detection < newest.count; ++detection) {
+      if (detection_used[detection])
+        continue;
+      size_t best_slot = kMaxFaces;
+      float lowest_visibility = 2.0f;
+      for (size_t slot = 0; slot < kMaxFaces; ++slot) {
+        if (!slot_used[slot] && filter->face_visibility[slot] < lowest_visibility) {
+          lowest_visibility = filter->face_visibility[slot];
+          best_slot = slot;
+        }
+      }
+      if (best_slot == kMaxFaces)
+        break;
+      slot_used[best_slot] = true;
+      next_present[best_slot] = true;
+      filter->target_faces[best_slot] = newest.faces[detection];
+      filter->displayed_faces[best_slot] = newest.faces[detection];
+    }
+
+    filter->face_present = next_present;
   }
 
   // A short fade hides detector cadence without making the face region lag noticeably.
   for (size_t index = 0; index < kMaxFaces; ++index) {
+    if (filter->face_present[index]) {
+      FaceResult &displayed = filter->displayed_faces[index];
+      const FaceResult &target = filter->target_faces[index];
+      constexpr float tracking_blend = 0.28f;
+      displayed.center_x += (target.center_x - displayed.center_x) * tracking_blend;
+      displayed.center_y += (target.center_y - displayed.center_y) * tracking_blend;
+      displayed.width += (target.width - displayed.width) * tracking_blend;
+      displayed.height += (target.height - displayed.height) * tracking_blend;
+      displayed.left_eye_x += (target.left_eye_x - displayed.left_eye_x) * tracking_blend;
+      displayed.left_eye_y += (target.left_eye_y - displayed.left_eye_y) * tracking_blend;
+      displayed.right_eye_x += (target.right_eye_x - displayed.right_eye_x) * tracking_blend;
+      displayed.right_eye_y += (target.right_eye_y - displayed.right_eye_y) * tracking_blend;
+      displayed.confidence = target.confidence;
+    }
     const float target = filter->face_present[index] ? 1.0f : 0.0f;
     filter->face_visibility[index] += (target - filter->face_visibility[index]) * 0.18f;
   }
@@ -236,6 +302,7 @@ void smooth_update(void *data, obs_data_t *settings)
   filter->smooth_center.store(static_cast<float>(obs_data_get_double(settings, kSmoothCenter)));
   filter->smooth_radius.store(static_cast<float>(obs_data_get_double(settings, kSmoothRadius)));
   filter->smooth_chroma.store(static_cast<float>(obs_data_get_double(settings, kSmoothChroma)));
+  filter->face_size_scaling.store(static_cast<float>(obs_data_get_double(settings, kFaceSizeScaling)));
   filter->eye_strength.store(static_cast<float>(obs_data_get_double(settings, kEyeStrength)));
   filter->sharpen_position.store(static_cast<int>(obs_data_get_int(settings, kSharpenPosition)));
   filter->sharpen_amount.store(static_cast<float>(obs_data_get_double(settings, kSharpenAmount)));
@@ -252,6 +319,7 @@ void smooth_defaults(obs_data_t *settings)
   obs_data_set_default_double(settings, kSmoothCenter, 7.0);
   obs_data_set_default_double(settings, kSmoothRadius, 10.0);
   obs_data_set_default_double(settings, kSmoothChroma, 1.0);
+  obs_data_set_default_double(settings, kFaceSizeScaling, 0.0);
   obs_data_set_default_double(settings, kEyeStrength, 0.45);
   obs_data_set_default_int(settings, kSharpenPosition, 0);
   obs_data_set_default_double(settings, kSharpenAmount, 0.35);
@@ -276,6 +344,10 @@ obs_properties_t *smooth_properties(void *)
                                                            obs_module_text("SmoothRadius"), 1.0, 120.0, 0.5);
   obs_property_float_set_suffix(width, obs_module_text("SmoothRadiusSuffix"));
   obs_property_set_long_description(width, obs_module_text("SmoothRadiusDescription"));
+  obs_property_t *face_scaling = obs_properties_add_float_slider(properties, kFaceSizeScaling,
+                                                                  obs_module_text("FaceSizeScaling"),
+                                                                  0.0, 1.0, 0.01);
+  obs_property_set_long_description(face_scaling, obs_module_text("FaceSizeScalingDescription"));
   obs_property_t *smooth_chroma = obs_properties_add_float_slider(properties, kSmoothChroma,
                                                                    obs_module_text("SmoothChroma"), 0.0, 1.0, 0.01);
   obs_property_set_long_description(smooth_chroma, obs_module_text("SmoothChromaDescription"));
@@ -340,6 +412,7 @@ void *smooth_create(obs_data_t *settings, obs_source_t *source)
     filter->smooth_center_param = gs_effect_get_param_by_name(filter->effect, "smooth_center");
     filter->smooth_radius_param = gs_effect_get_param_by_name(filter->effect, "smooth_radius");
     filter->smooth_chroma_param = gs_effect_get_param_by_name(filter->effect, "smooth_chroma");
+    filter->face_size_scaling_param = gs_effect_get_param_by_name(filter->effect, "face_size_scaling");
     filter->eye_strength_param = gs_effect_get_param_by_name(filter->effect, "eye_strength");
     filter->sharpen_amount_param = gs_effect_get_param_by_name(filter->effect, "sharpen_amount");
     filter->sharpen_radius_param = gs_effect_get_param_by_name(filter->effect, "sharpen_radius");
@@ -393,6 +466,7 @@ void set_face_parameters(SmoothFilter *filter, uint32_t width, uint32_t height)
   struct vec2 texel_size;
   vec2_set(&texel_size, 1.0f / static_cast<float>(width), 1.0f / static_cast<float>(height));
   gs_effect_set_vec2(filter->texel_size_param, &texel_size);
+  gs_effect_set_float(filter->face_size_scaling_param, filter->face_size_scaling.load());
 
   for (size_t index = 0; index < kMaxFaces; ++index) {
     const FaceResult &face = filter->displayed_faces[index];

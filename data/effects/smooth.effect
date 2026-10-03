@@ -17,6 +17,7 @@ uniform float smooth_strength;
 uniform float smooth_center;
 uniform float smooth_radius;
 uniform float smooth_chroma;
+uniform float face_size_scaling;
 uniform float eye_strength;
 uniform float sharpen_amount;
 uniform float sharpen_radius;
@@ -55,6 +56,26 @@ float ellipse_mask(float2 uv, float2 center, float2 size, float feather)
 {
   float2 p = (uv - center) / max(size * 0.5, float2(0.0001, 0.0001));
   return 1.0 - smoothstep(1.0 - feather, 1.0, length(p));
+}
+
+float face_detail_scale(float2 size)
+{
+  // Existing pixel controls retain their value at a 480-pixel-tall face.
+  float face_height_pixels = size.y / max(texel_size.y, 0.000001);
+  return clamp(face_height_pixels / 480.0, 0.25, 4.0);
+}
+
+float blended_face_scale(float face_a, float face_b, float face_c,
+                         float2 size_a, float2 size_b, float2 size_c)
+{
+  float total = face_a + face_b + face_c;
+  if (total <= 0.0001)
+    return 1.0;
+  return (
+    face_a * face_detail_scale(size_a) +
+    face_b * face_detail_scale(size_b) +
+    face_c * face_detail_scale(size_c)
+  ) / total;
 }
 
 float eye_exclusion_mask(float2 uv, float2 size, float2 eye_a, float2 eye_b)
@@ -122,6 +143,9 @@ float4 PSBeauty(VertData v_in) : TARGET
   float face_2 = ellipse_mask(uv, face_center_2, face_size_2, 0.22) * detection_alpha_2;
   float face_3 = ellipse_mask(uv, face_center_3, face_size_3, 0.22) * detection_alpha_3;
   float face = max(face_1, max(face_2, face_3));
+  float detected_scale = blended_face_scale(face_1, face_2, face_3,
+                                            face_size, face_size_2, face_size_3);
+  float detail_scale = lerp(1.0, detected_scale, face_size_scaling);
   float smooth_region_1 = face_1 * (1.0 - eye_exclusion_mask(uv, face_size, left_eye, right_eye) * 0.72);
   float smooth_region_2 = face_2 * (1.0 - eye_exclusion_mask(uv, face_size_2, left_eye_2, right_eye_2) * 0.72);
   float smooth_region_3 = face_3 * (1.0 - eye_exclusion_mask(uv, face_size_3, left_eye_3, right_eye_3) * 0.72);
@@ -154,9 +178,10 @@ float4 PSBeauty(VertData v_in) : TARGET
 
   // Decompose the image into fine detail, a middle band, and broad structure.
   // Removing only the middle band keeps pores and major facial lines intact.
-  float half_width = smooth_radius * 0.5;
-  float inner_radius = max(0.75, smooth_center - half_width);
-  float outer_radius = max(inner_radius + 0.5, smooth_center + half_width);
+  float half_width = smooth_radius * detail_scale * 0.5;
+  float scaled_center = smooth_center * detail_scale;
+  float inner_radius = max(0.35, scaled_center - half_width);
+  float outer_radius = max(inner_radius + 0.25, scaled_center + half_width);
   float3 inner_base = edge_aware_lowpass(uv, original_luma, inner_radius);
   float3 outer_base = edge_aware_lowpass(uv, original_luma, outer_radius);
   float3 middle_band = inner_base - outer_base;
@@ -178,7 +203,14 @@ float4 PSSharpen(VertData v_in) : TARGET
 {
   float2 uv = v_in.uv;
   float4 original = image.Sample(linear_clamp, uv);
-  float2 radius = texel_size * sharpen_radius;
+  float face_1 = ellipse_mask(uv, face_center, face_size, 0.22) * detection_alpha;
+  float face_2 = ellipse_mask(uv, face_center_2, face_size_2, 0.22) * detection_alpha_2;
+  float face_3 = ellipse_mask(uv, face_center_3, face_size_3, 0.22) * detection_alpha_3;
+  float face = max(face_1, max(face_2, face_3));
+  float detected_scale = blended_face_scale(face_1, face_2, face_3,
+                                            face_size, face_size_2, face_size_3);
+  float detail_scale = lerp(1.0, detected_scale, face_size_scaling * sharpen_masked);
+  float2 radius = texel_size * sharpen_radius * detail_scale;
   float3 blurred = (
     image.Sample(linear_clamp, uv + float2(1.0, 0.0) * radius).rgb +
     image.Sample(linear_clamp, uv + float2(-1.0, 0.0) * radius).rgb +
@@ -191,10 +223,6 @@ float4 PSSharpen(VertData v_in) : TARGET
   ) * 0.125;
   float3 rgb_detail = original.rgb - blurred;
   float luma_detail = luminance(original.rgb) - luminance(blurred);
-  float face_1 = ellipse_mask(uv, face_center, face_size, 0.22) * detection_alpha;
-  float face_2 = ellipse_mask(uv, face_center_2, face_size_2, 0.22) * detection_alpha_2;
-  float face_3 = ellipse_mask(uv, face_center_3, face_size_3, 0.22) * detection_alpha_3;
-  float face = max(face_1, max(face_2, face_3));
   float sharpen_mask = lerp(1.0, face, sharpen_masked);
   float amount = sharpen_amount * sharpen_mask;
   float3 luma_sharpened = original.rgb + float3(luma_detail, luma_detail, luma_detail) * amount;

@@ -82,6 +82,12 @@ void FaceDetector::run()
                 [](const Candidate &a, const Candidate &b) { return a.area > b.area; });
 
       next.count = std::min(kMaxFaces, candidates.size());
+      candidates.resize(next.count);
+      std::sort(candidates.begin(), candidates.end(), [&faces](const Candidate &a, const Candidate &b) {
+        const float center_a = faces.at<float>(a.row, 0) + faces.at<float>(a.row, 2) * 0.5f;
+        const float center_b = faces.at<float>(b.row, 0) + faces.at<float>(b.row, 2) * 0.5f;
+        return center_a < center_b;
+      });
       for (size_t index = 0; index < next.count; ++index) {
         FaceResult &result = next.faces[index];
         const float *face = faces.ptr<float>(candidates[index].row);
